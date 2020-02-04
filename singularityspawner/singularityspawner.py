@@ -169,6 +169,11 @@ class SingularitySpawner(LocalProcessSpawner):
     def cmd(self):
         return self._build_cmd()
 
+    def get_env(self):
+        env = super().get_env()
+        env['KERNEL_USERNAME'] = self.user.name
+        return env
+
     @gen.coroutine
     def start(self):
         """
@@ -178,8 +183,10 @@ class SingularitySpawner(LocalProcessSpawner):
         """
         image_path = self.get_image_path()
         pull_from_url = self.user_options.get('pull_from_url',False)
+        
         if pull_from_url:
             image_url = self.get_image_url()
-            self.pull_image(image_url)
+            self.pull_image(image_url)           
 
-        super(SingularitySpawner,self).start()
+        (self.ip,self.port) = yield super(SingularitySpawner,self).start()
+        return (self.ip,self.port)
