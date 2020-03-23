@@ -14,10 +14,12 @@ from tornado import gen
 from tornado.process import Subprocess
 from tornado.iostream import StreamClosedError
 from singularity.cli import Singularity
+from spython.main import Client
 
 from jupyterhub.spawner import (
     LocalProcessSpawner, set_user_setuid
 )
+import subprocess as sp
 from jupyterhub.utils import random_port
 from jupyterhub.traitlets import Command
 from traitlets import (
@@ -57,7 +59,16 @@ class SingularitySpawner(LocalProcessSpawner):
         """
     ).tag(config=True)
 
-    notebook_cmd = Command(['jupyterhub-singleuser'],
+    default_singularity_options = Unicode('--writable',
+            help="""
+            This is the singularity command that will be executed when starting the
+            single-user server. The image path and notebook server args will be concatenated to the end of this command. This is a good place to
+            specify any site-specific options that should be applied to all users,
+            such as default mounts.
+            """
+        ).tag(config=True)
+
+    notebook_cmd = Unicode('jupyterhub-singleuser',
         help="""
         The command used for starting the single-user server.
         Provide either a string or a list containing the path to the startup script command. Extra arguments,
@@ -90,6 +101,14 @@ class SingularitySpawner(LocalProcessSpawner):
         has been selected.
         """
     ).tag(config=True)
+    
+    default_gateway_address = Unicode('',
+        help="""
+        Singularity Hub or Docker URI from which the notebook image will be
+        pulled, if no other URI is specified by the user but the _pull_ option
+        has been selected.
+        """
+    ).tag(config=True)
 
     options_form = Unicode()
 
@@ -111,9 +130,17 @@ class SingularitySpawner(LocalProcessSpawner):
             Specify the Singularity image to use (absolute filepath):
           </label>
           <input class="form-control" name="user_image_path" value="{default_image_path}" required autofocus>
+          <label id="gateway-label" for="user_gateway_address">
+            Gateway Url (optional):
+          </label>
+          <input class="form-control" name="user_gateway_address" value="{default_gateway_address}" autofocus>
+          
         </div>
         """
     )
+    
+    #<input class="form-control" name="user_singularity_options" value="{default_singularity_options}" required autofocus>
+     #     <input class="form-control" name="notebook_cmd" value="{notebook_cmd}" required autofocus>
 
     def format_default_image_path(self):
         """Format the image path template string."""
@@ -125,7 +152,7 @@ class SingularitySpawner(LocalProcessSpawner):
     def _options_form(self):
         """Render the options form."""
         default_image_path = self.format_default_image_path()
-        format_options = dict(default_image_path=default_image_path,default_image_url=self.default_image_url)
+        format_options = dict(default_image_path=default_image_path,default_image_url=self.default_image_url,default_gateway_address=self.default_gateway_address)
         options_form = self.form_template.format(**format_options)
         return JS_SCRIPT + options_form
 
@@ -134,8 +161,9 @@ class SingularitySpawner(LocalProcessSpawner):
         user_image_path = form_data.get('user_image_path', None)
         user_image_url = form_data.get('user_image_url', None)
         pull_from_url = form_data.get('pull_from_url',False)
-
-        return dict(user_image_path=user_image_path,user_image_url=user_image_url,pull_from_url=pull_from_url)
+        user_gateway_address = form_data.get('user_gateway_address',None)
+        
+        return dict(user_image_path=user_image_path,user_image_url=user_image_url,pull_from_url=pull_from_url,user_gateway_address=user_gateway_address)
 
     def get_image_url(self):
         """Get image URL to pull image from user options or default."""
@@ -148,21 +176,37 @@ class SingularitySpawner(LocalProcessSpawner):
         default_image_path = self.format_default_image_path()
         image_path = self.user_options.get('user_image_path',[default_image_path])
         return image_path
+        
+    def get_gateway_address(self):
+        """Get image filepath specified in user options else default."""
+        default_gateway_address = self.default_gateway_address
+        user_gateway_address = self.user_options.get('user_gateway_address',[default_gateway_address])
+        user_gateway_address=user_gateway_address[0]
+        return user_gateway_address
 
     @gen.coroutine
     def pull_image(self,image_url):
         """Pull the singularity image to specified image path."""
         image_path = self.get_image_path()
-        s = Singularity()
-        container_path = s.pull(image_url[0],image_name=image_path[0])
-        return Unicode(container_path)
+        self.log.info("creating sandbox for notebook")
+            
+        try:
+            build_cmd=sp.Popen(['singularity', 'build','--force','--fakeroot','--sandbox',image_path[0],image_url[0]],preexec_fn=set_user_setuid(self.user.name))
+            (output, err) =  build_cmd.communicate()
+            #res=Client.build(image_url[0],image_path[0],sandbox=True,sudo=False,options=['--fakeroot'],return_result=True) 
+            self.log.debug(output)
+        except:
+            self.log.error(res)
+        return Unicode(image_path)
 
     def _build_cmd(self):
         image_path = self.get_image_path()
+
         cmd = []
         cmd.extend(self.singularity_cmd)
+        cmd.extend([self.default_singularity_options])
         cmd.extend(image_path)
-        cmd.extend(self.notebook_cmd)
+        cmd.extend([self.notebook_cmd])
         return cmd
 
     @property
@@ -172,6 +216,9 @@ class SingularitySpawner(LocalProcessSpawner):
     def get_env(self):
         env = super().get_env()
         env['KERNEL_USERNAME'] = self.user.name
+        gateway = self.get_gateway_address()
+        if gateway:
+            env['JUPYTER_GATEWAY_URL']=gateway
         return env
 
     @gen.coroutine
@@ -182,11 +229,15 @@ class SingularitySpawner(LocalProcessSpawner):
         is selected.
         """
         image_path = self.get_image_path()
+        
         pull_from_url = self.user_options.get('pull_from_url',False)
         
+        if not os.path.exists(image_path[0]):
+            pull_from_url=True
+                
         if pull_from_url:
             image_url = self.get_image_url()
-            self.pull_image(image_url)           
+            self.pull_image(image_url)
 
         (self.ip,self.port) = yield super(SingularitySpawner,self).start()
         return (self.ip,self.port)
