@@ -201,12 +201,25 @@ class SingularitySpawner(LocalProcessSpawner):
 
     def _build_cmd(self):
         image_path = self.get_image_path()
-
+        options=[]
+        options.append(self.default_singularity_options)
+        
+        mount_dir=os.path.join("/home",self.user.name,'jupyter_mounts')
+        target_mount_dir=os.path.join("/home",self.user.name,'mnt')
+        bind_opts=[]
+        
+        if os.path.exists(mount_dir):
+            bind_opts.extend([os.path.join(mount_dir,d)+":"+os.path.join(target_mount_dir,d) for d in os.listdir(mount_dir) if os.path.islink(os.path.join(mount_dir,d))])
+            options.append('--bind')
+            
+            options.append(','.join(bind_opts))
+        
         cmd = []
         cmd.extend(self.singularity_cmd)
-        cmd.extend([self.default_singularity_options])
+        cmd.extend(options)
         cmd.extend(image_path)
         cmd.extend([self.notebook_cmd])
+       
         return cmd
 
     @property
