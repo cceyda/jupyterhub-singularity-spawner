@@ -59,7 +59,7 @@ class SingularitySpawner(LocalProcessSpawner):
         """
     ).tag(config=True)
 
-    default_singularity_options = Unicode('--writable',
+    default_singularity_options = Unicode('--writable --fakeroot --no-home --no-privs',
             help="""
             This is the singularity command that will be executed when starting the
             single-user server. The image path and notebook server args will be concatenated to the end of this command. This is a good place to
@@ -202,16 +202,22 @@ class SingularitySpawner(LocalProcessSpawner):
     def _build_cmd(self):
         image_path = self.get_image_path()
         options=[]
-        options.append(self.default_singularity_options)
+        options_in=self.default_singularity_options.split(" ")
+        options.extend(options_in)
         
-        mount_dir=os.path.join("/home",self.user.name,'jupyter_mounts')
+        user_home=os.path.expanduser('~'+self.user.name)
+        
+        mount_dir=os.path.join(user_home,'jupyter_mounts')
         target_mount_dir=os.path.join("/home",self.user.name,'mnt')
         bind_opts=[]
+        if '--no-home' in options_in:
+            bind_opts.append(f"{user_home}:/home/{self.user.name}")
         
         if os.path.exists(mount_dir):
             bind_opts.extend([os.path.join(mount_dir,d)+":"+os.path.join(target_mount_dir,d) for d in os.listdir(mount_dir) if os.path.islink(os.path.join(mount_dir,d))])
+        
+        if bind_opts:
             options.append('--bind')
-            
             options.append(','.join(bind_opts))
         
         cmd = []
@@ -231,7 +237,7 @@ class SingularitySpawner(LocalProcessSpawner):
         env['KERNEL_USERNAME'] = self.user.name
         gateway = self.get_gateway_address()
         if gateway:
-            env['JUPYTER_GATEWAY_URL']=gateway
+            env['JUPYTER_GATEWAY_URL']=gateway.strip()
         return env
 
     @gen.coroutine
